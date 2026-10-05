@@ -9,10 +9,21 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
+
+def _clean_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1].strip()
+    return value
+
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
 MAX_STEPS = 6  # safety limit so the loop can never run forever
+
+TELEGRAM_TOKEN = _clean_env("TELEGRAM_TOKEN")
+TELEGRAM_USER_ID = _clean_env("TELEGRAM_USER_ID")
+API_KEY = os.getenv("API_KEY", "")  # optional: protects the /chat endpoint
 
 SYSTEM_PROMPT = (
     "You are PocketAgent, a helpful personal assistant. "

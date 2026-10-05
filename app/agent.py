@@ -48,23 +48,35 @@ def run_agent(contents: list) -> str:
     """Run one user turn. `contents` is the conversation history (modified in place)."""
     for _ in range(config.MAX_STEPS):
         response = call_model(contents)
-        contents.append(response.candidates[0].content)
+        if response is None or not response.candidates:
+            return "Gemini returned no response. Please try again."
 
-        calls = response.function_calls
+        candidate = response.candidates[0]
+        if candidate is None or candidate.content is None:
+            return "Gemini returned no response. Please try again."
+
+        calls = response.function_calls or []
+        call_names = []
+        for call in calls:
+            if not call.name:
+                return "Gemini returned an invalid tool call. Please try again."
+            call_names.append(call.name)
+
+        contents.append(candidate.content)
         if not calls:  # no tool requested -> final answer
-            return response.text
+            return response.text or "(no reply)"
 
         result_parts = []
-        for call in calls:
+        for call, call_name in zip(calls, call_names):
             args = dict(call.args or {})
-            print(f"  [tool] {call.name}({args})")
+            print(f"  [tool] {call_name}({args})")
             try:
-                result = TOOLS[call.name](**args)
+                result = TOOLS[call_name](**args)
             except Exception as e:
                 result = f"Error: {e}"
             result_parts.append(
                 types.Part.from_function_response(
-                    name=call.name, response={"result": result}
+                    name=call_name, response={"result": result}
                 )
             )
         contents.append(types.Content(role="user", parts=result_parts))
