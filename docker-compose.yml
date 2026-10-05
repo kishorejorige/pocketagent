@@ -1,0 +1,7 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/app/data   # keeps your tasks, notes and memory database
+    restart: unless-stopped
