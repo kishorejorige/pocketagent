@@ -1,5 +1,6 @@
 import asyncio
 import logging
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 from telegram import Update
 from telegram.ext import (
