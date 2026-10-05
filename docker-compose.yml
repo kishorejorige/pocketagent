@@ -2,6 +2,8 @@ services:
   bot:
     build: .
     env_file: .env
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434
     volumes:
-      - ./data:/app/data   # keeps your tasks, notes and memory database
+      - ./data:/app/data   # keeps your tasks, notes, memory database and documents
     restart: unless-stopped

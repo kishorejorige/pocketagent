@@ -25,6 +25,9 @@ TELEGRAM_TOKEN = _clean_env("TELEGRAM_TOKEN")
 TELEGRAM_USER_ID = _clean_env("TELEGRAM_USER_ID")
 API_KEY = os.getenv("API_KEY", "")  # optional: protects the /chat endpoint
 
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+
 SYSTEM_PROMPT = (
     "You are PocketAgent, a helpful personal assistant. "
     "Use your tools when they help. Keep answers short and clear. "

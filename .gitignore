@@ -6,3 +6,6 @@ data/*.json
 logs/*.log
 
 .venv/
+
+data/docs/*
+!data/docs/.gitkeep
