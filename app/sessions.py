@@ -25,8 +25,11 @@ def chat(session_id: str, text: str) -> str:
         history.append(types.Content(role="user", parts=[types.Part(text=text)]))
         try:
             reply = run_agent(history)
-        except errors.APIError as e:
+            _trim(history)
+
+        except Exception as e:
             del history[start:]  # drop the half-finished turn
-            return f"Gemini is unavailable right now ({e.code}). Try again in a minute."
-        _trim(history)
+            code = getattr(e, "code", type(e).__name__)
+            return f"No AI backend is available right now ({code}). Try again in a minute."
+        
         return reply or "(no reply)"

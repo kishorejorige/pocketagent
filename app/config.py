@@ -34,3 +34,9 @@ SYSTEM_PROMPT = (
     "When the user tells you a lasting fact or preference about themselves, "
     "call remember_fact. Use notes only for ideas and reminders, and tasks for to-dos."
 )
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").lower()  # gemini | ollama | auto
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "mistral")
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "2m")  # unload the model from RAM after 2 idle minutes
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
