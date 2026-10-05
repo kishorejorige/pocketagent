@@ -5,30 +5,41 @@ from google import genai
 from google.genai import errors, types
 
 from app import config
+from app.memory import store
 from app.tools import ALL_TOOLS, TOOLS
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
 
-gen_config = types.GenerateContentConfig(
-    system_instruction=config.SYSTEM_PROMPT,
-    tools=ALL_TOOLS,  # the SDK turns each function's hints + docstring into a schema
-    # We run the loop ourselves, so turn off automatic tool calling
-    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-)
+
+def build_config() -> types.GenerateContentConfig:
+    """Rebuilt every call so newly saved facts show up immediately."""
+    facts = store.list_facts()
+    prompt = config.SYSTEM_PROMPT
+    if facts:
+        prompt += "\n\nKnown facts about the user:\n" + "\n".join(f"- {t}" for _, t in facts)
+    return types.GenerateContentConfig(
+        system_instruction=prompt,
+        tools=ALL_TOOLS,  # the SDK turns each function's hints + docstring into a schema
+        # We run the loop ourselves, so turn off automatic tool calling
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+    )
 
 
 def call_model(contents: list):
-    """Call Gemini, retrying when the server is busy (503) or rate-limited (429)."""
+    """Call Gemini. Retry on 429/500/503, and switch to the backup model after 2 failures."""
     delay = 2
     for attempt in range(5):
+        model = config.MODEL if attempt < 2 else config.FALLBACK_MODEL
         try:
             return client.models.generate_content(
-                model=config.MODEL, contents=contents, config=gen_config
+                model=model, contents=contents, config=build_config()
             )
         except errors.APIError as e:
             if e.code not in (429, 500, 503) or attempt == 4:
                 raise
-            print(f"  [retry] Gemini busy ({e.code}), waiting {delay}s...")
+            nxt = config.MODEL if attempt + 1 < 2 else config.FALLBACK_MODEL
+            note = f", switching to {nxt}" if nxt != model else ""
+            print(f"  [retry] {model} busy ({e.code}), waiting {delay}s{note}...")
             time.sleep(delay)
             delay *= 2
 
