@@ -1,5 +1,6 @@
 """Local chat backend (Ollama). Our history is stored in Gemini format; this module
 converts it to Ollama messages and converts Ollama's reply back."""
+import re
 import typing
 from types import SimpleNamespace
 
@@ -68,19 +69,30 @@ def coerce_args(fn, args: dict) -> dict:
     return out
 
 
+def strip_thinking(text: str) -> str:
+    """Remove leaked reasoning, e.g. 'reasoning...</think>answer'."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return text.strip()
+
+
 def chat(contents: list, system_prompt: str, tools: list):
     """One model call. Returns (text, calls, content) in the shape the agent loop uses."""
     client = ollama.Client(host=config.OLLAMA_URL, timeout=config.OLLAMA_TIMEOUT)
+    extra = {}
+    if "qwen3" in config.OLLAMA_MODEL.lower():
+        extra["think"] = False  # skip the slow "thinking" phase
     resp = client.chat(
         model=config.OLLAMA_MODEL,
         messages=to_ollama_messages(contents, system_prompt),
         tools=tools,
         options={"num_ctx": config.OLLAMA_NUM_CTX},
         keep_alive=config.OLLAMA_KEEP_ALIVE,
-        think=False if config.OLLAMA_THINK == "off" else None,
+        **extra,
     )
     msg = resp.message
-    text = msg.content or ""
+    text = strip_thinking(msg.content or "")
     calls = [
         SimpleNamespace(name=tc.function.name, args=dict(tc.function.arguments or {}))
         for tc in (msg.tool_calls or [])

@@ -35,6 +35,13 @@ def test_coerce_args():
     assert coerce_args(complete_task, {"task_id": 2.0}) == {"task_id": 2}
     assert coerce_args(complete_task, {"task_id": "abc"}) == {"task_id": "abc"}
 
+def test_strip_thinking():
+    from app.llm_local import strip_thinking
+
+    assert strip_thinking("Okay, let me see...\n</think>\n\nTask 9 done.") == "Task 9 done."
+    assert strip_thinking("<think>hmm</think>Hello") == "Hello"
+    assert strip_thinking("Plain answer") == "Plain answer"
+
 
 def test_tool_schema_from_docstring():
     def list_notes(limit: int = 10) -> str:
