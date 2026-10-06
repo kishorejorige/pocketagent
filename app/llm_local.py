@@ -77,6 +77,7 @@ def chat(contents: list, system_prompt: str, tools: list):
         tools=tools,
         options={"num_ctx": config.OLLAMA_NUM_CTX},
         keep_alive=config.OLLAMA_KEEP_ALIVE,
+        think=False if config.OLLAMA_THINK == "off" else None,
     )
     msg = resp.message
     text = msg.content or ""
