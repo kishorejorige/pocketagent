@@ -63,10 +63,16 @@ def call_gemini(contents: list) -> LLMResult:
             delay *= 2
 
 
-def call_local(contents: list) -> LLMResult:
-    text, calls, content = local_chat(contents, build_system_prompt(), ALL_TOOLS)
-    return LLMResult(text=text, calls=calls, content=content, backend="local")
+LOCAL_RULES = (
+    "\n\nIMPORTANT: To add, complete, save or look up anything you MUST call a tool. "
+    "Never say an action is done unless you called the tool in this turn. "
+    "If unsure, call the tool."
+)
 
+
+def call_local(contents: list) -> LLMResult:
+    text, calls, content = local_chat(contents, build_system_prompt() + LOCAL_RULES, ALL_TOOLS)
+    return LLMResult(text=text, calls=calls, content=content, backend="local")
 
 def run_agent(contents: list) -> str:
     """Run one user turn. `contents` is the conversation history (modified in place)."""
@@ -86,7 +92,7 @@ def run_agent(contents: list) -> str:
         contents.append(result.content)
 
         if not result.calls:  # no tool requested -> final answer
-            return result.text
+            return f"[local model] {result.text}" if result.backend == "local" else result.text
 
         result_parts = []
         for call in result.calls:
