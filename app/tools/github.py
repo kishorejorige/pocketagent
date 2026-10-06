@@ -1,4 +1,5 @@
 import json
+import re
 import urllib.request
 
 
@@ -8,6 +9,8 @@ def check_github_repo(repo: str = "kishorejorige/pocketagent") -> str:
     Args:
         repo: Repository as owner/name, for example kishorejorige/pocketagent.
     """
+    if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo):
+        return "Invalid repository format. Use owner/name."
     url = f"https://api.github.com/repos/{repo}/contents/"
     req = urllib.request.Request(url, headers={"User-Agent": "PocketAgent"})
     try:
