@@ -5,3 +5,5 @@ fastapi
 uvicorn
 python-telegram-bot
 ollama
+pypdf
+python-docx
