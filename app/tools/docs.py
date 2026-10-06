@@ -17,3 +17,25 @@ def search_docs(query: str) -> str:
     if not results:
         return "No documents found. Add .txt or .md files to data/docs."
     return "\n\n".join(f"[{name}] (score {s:.2f})\n{text}" for s, name, text in results)
+
+
+def list_docs() -> str:
+    """List all saved documents in data/docs with their file sizes."""
+    if not rag.DOCS_DIR.exists():
+        return "No documents found."
+    files = [
+        f for f in sorted(rag.DOCS_DIR.iterdir())
+        if f.is_file() and f.suffix.lower() in rag.EXTENSIONS
+    ]
+    if not files:
+        return "No documents found."
+
+    def _format_size(size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        elif size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        else:
+            return f"{size / (1024 * 1024):.1f} MB"
+
+    return "\n".join(f"- {f.name} ({_format_size(f.stat().st_size)})" for f in files)
