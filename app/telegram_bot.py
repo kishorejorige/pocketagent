@@ -13,6 +13,7 @@ from telegram.ext import (
 
 from app import config
 from app.memory import rag
+from app.rate_limit import allow_message
 from app.sessions import chat
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,9 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         or user is None
         or chat_instance is None
     ):
+        return
+    if not allow_message(f"telegram:{user.id}"):
+        await message.reply_text("Rate limit reached. Try again in a minute.")
         return
     await context.bot.send_chat_action(chat_instance.id, "typing")
     reply = await asyncio.to_thread(chat, f"tg-{user.id}", message.text)

@@ -19,6 +19,8 @@ def _clean_env(name: str) -> str:
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-3.1-flash-lite")
+GEMINI_COOLDOWN_SECONDS = int(os.getenv("GEMINI_COOLDOWN_SECONDS", "600"))
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "10"))
 MAX_STEPS = 6  # safety limit so the loop can never run forever
 
 TELEGRAM_TOKEN = _clean_env("TELEGRAM_TOKEN")

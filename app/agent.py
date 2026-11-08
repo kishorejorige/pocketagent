@@ -1,6 +1,9 @@
 """PocketAgent core loop. Run the terminal chat with:  python -m app.agent"""
+import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 from google import genai
 from google.genai import errors, types
@@ -12,6 +15,25 @@ from app.memory import store
 from app.tools import ALL_TOOLS, TOOLS
 
 client = genai.Client(api_key=config.GEMINI_API_KEY)
+_model_cooldowns: dict[str, float] = {}
+_cooldown_lock = threading.Lock()
+
+
+class GeminiUnavailable(Exception):
+    pass
+
+
+def _model_available(model: str) -> bool:
+    now = time.monotonic()
+    with _cooldown_lock:
+        until = _model_cooldowns.get(model)
+        if until is None:
+            return True
+        if until > now:
+            return False
+        del _model_cooldowns[model]
+    print(f"  [retry] {model} cooldown ended; retrying...")
+    return True
 
 
 @dataclass
@@ -32,7 +54,7 @@ def build_system_prompt() -> str:
 
 
 def call_gemini(contents: list) -> LLMResult:
-    """Retry on 429/500/503, and switch to the backup Gemini model after 2 failures."""
+    """Retry transient errors and skip rate-limited models while they cool down."""
     gen_config = types.GenerateContentConfig(
         system_instruction=build_system_prompt(),
         tools=ALL_TOOLS,  # the SDK turns each function's hints + docstring into a schema
@@ -40,8 +62,18 @@ def call_gemini(contents: list) -> LLMResult:
         automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
     )
     delay = 2
+    primary = config.MODEL
+    fallback = config.FALLBACK_MODEL
+    models = list(dict.fromkeys((primary, fallback)))
+    available = [model for model in models if _model_available(model)]
+    if not available:
+        raise GeminiUnavailable(
+            "Both Gemini models are cooling down. Please try again in a few minutes."
+        )
+
+    model = available[0]
+    primary_failures = 0
     for attempt in range(5):
-        model = config.MODEL if attempt < 2 else config.FALLBACK_MODEL
         try:
             r = client.models.generate_content(
                 model=model, contents=contents, config=gen_config
@@ -54,13 +86,100 @@ def call_gemini(contents: list) -> LLMResult:
                 backend="gemini",
             )
         except errors.APIError as e:
-            if e.code not in (429, 500, 503) or attempt == 4:
-                raise
-            nxt = config.MODEL if attempt + 1 < 2 else config.FALLBACK_MODEL
-            note = f", switching to {nxt}" if nxt != model else ""
+            if e.code == 429:
+                retry_after = _retry_after_seconds(e)
+                cooldown = (
+                    retry_after
+                    if retry_after is not None
+                    else config.GEMINI_COOLDOWN_SECONDS
+                )
+                with _cooldown_lock:
+                    _model_cooldowns[model] = time.monotonic() + cooldown
+                print(f"  [cooldown] {model} rate limited; cooling down for {cooldown:g}s")
+                next_models = [candidate for candidate in models if candidate != model]
+                next_model = next(
+                    (
+                        candidate for candidate in next_models
+                        if _model_available(candidate)
+                    ),
+                    None,
+                )
+                if next_model is None:
+                    raise GeminiUnavailable(
+                        "Both Gemini models are unavailable or rate-limited. "
+                        "Please try again later."
+                    ) from e
+                print(f"  [retry] {model} rate limited (429), switching to {next_model}...")
+                model = next_model
+                continue
+
+            if e.code not in (500, 503):
+                next_model = next(
+                    (
+                        candidate for candidate in models
+                        if candidate != model
+                        and _model_available(candidate)
+                    ),
+                    None,
+                )
+                if next_model is None:
+                    raise GeminiUnavailable(
+                        "Both Gemini models failed. Please try again later."
+                    ) from e
+                print(f"  [retry] {model} failed ({e.code}), switching to {next_model}...")
+                model = next_model
+                continue
+
+            if model == primary:
+                primary_failures += 1
+            next_model = model
+            if model == primary and primary_failures >= 2 and fallback in available:
+                next_model = fallback
+            if attempt == 4:
+                raise GeminiUnavailable(
+                    "Both Gemini models are unavailable right now. Please try again later."
+                ) from e
+            note = f", switching to {next_model}" if next_model != model else ""
             print(f"  [retry] {model} busy ({e.code}), waiting {delay}s{note}...")
             time.sleep(delay)
             delay *= 2
+            model = next_model
+        except Exception as e:
+            next_model = next(
+                (
+                    candidate for candidate in models
+                    if candidate != model
+                    and _model_available(candidate)
+                ),
+                None,
+            )
+            if next_model is None:
+                raise GeminiUnavailable(
+                    "Both Gemini models are unavailable right now. Please try again later."
+                ) from e
+            print(f"  [retry] {model} failed ({type(e).__name__}), switching to {next_model}...")
+            model = next_model
+    raise GeminiUnavailable("Both Gemini models are unavailable right now. Please try again later.")
+
+
+def _retry_after_seconds(error: errors.APIError) -> float | None:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return None
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        except (TypeError, ValueError, OverflowError):
+            return None
 
 
 LOCAL_RULES = (
@@ -85,10 +204,20 @@ def run_agent(contents: list) -> str:
                 result = call_gemini(contents)
             except Exception as e:
                 if config.LLM_PROVIDER != "auto":
+                    if isinstance(e, GeminiUnavailable):
+                        return str(e)
                     raise
                 print(f"  [fallback] Gemini failed ({type(e).__name__}); using local {config.OLLAMA_MODEL}")
                 use_local = True  # stay local for the rest of this turn
-                result = call_local(contents)
+                try:
+                    result = call_local(contents)
+                except Exception:
+                    if isinstance(e, GeminiUnavailable):
+                        return (
+                            "Gemini models are unavailable and local Ollama could not "
+                            "answer. Please try again later."
+                        )
+                    raise
         contents.append(result.content)
 
         if not result.calls:  # no tool requested -> final answer

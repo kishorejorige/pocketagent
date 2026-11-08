@@ -85,6 +85,14 @@ Set `EMBEDDING_PROVIDER` to choose the document embedding backend:
 The default Gemini embedding model is `gemini-embedding-001`. Ollama must be
 running and reachable at `OLLAMA_URL` only when selected or used as a fallback.
 
+## Rate limits and fallback
+
+Gemini 429 responses switch to the fallback model immediately and cool down the
+limited model for `GEMINI_COOLDOWN_SECONDS` (default 600 seconds), or for the
+response's `Retry-After` duration when provided. HTTP 500/503 errors keep
+exponential retries. `RATE_LIMIT_PER_MINUTE` limits each Telegram user and API
+session to 10 messages per minute by default; set it to `0` to disable the limit.
+
 ## Run PocketAgent
 
 ### Terminal chat
