@@ -2,6 +2,8 @@
 Run `python -m app.memory.rag` to (re)build the index by hand."""
 import json
 import math
+import re
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -16,8 +18,10 @@ from app.config import DATA_DIR
 
 DOCS_DIR = DATA_DIR / "docs"
 INDEX_FILE = DATA_DIR / "rag_index.json"
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
+CHUNK_SIZE = 900
+CHUNK_OVERLAP = 150
 EMBED_BATCH_SIZE = 16
 EMBED_BATCH_DELAY = 1
 EMBED_RETRIES = 5
@@ -176,6 +180,116 @@ def chunk_text(text: str, size: int = 900, overlap: int = 150) -> list[str]:
     return chunks
 
 
+def _section_prefix(heading_path: list[str], table_header: str = "") -> str:
+    parts = []
+    if heading_path:
+        parts.append(f"Section path: {' > '.join(heading_path)}")
+    if table_header:
+        parts.append(f"Table header: {table_header}")
+    return "\n".join(parts) + ("\n" if parts else "")
+
+
+def _prefix_chunks(
+    text: str,
+    heading_path: list[str],
+    table_header: str = "",
+    size: int = CHUNK_SIZE,
+    overlap: int = CHUNK_OVERLAP,
+) -> list[str]:
+    prefix = _section_prefix(heading_path, table_header)
+    if len(prefix) >= size:
+        prefix = prefix[:size - 1] + "\n"
+    content_size = size - len(prefix)
+    content_chunks = chunk_text(
+        text,
+        size=content_size,
+        overlap=min(overlap, max(0, content_size - 1)),
+    )
+    return [prefix + chunk for chunk in content_chunks]
+
+
+def _markdown_chunks(text: str) -> list[str]:
+    heading_path: list[str] = []
+    blocks: list[str] = []
+    chunks: list[str] = []
+
+    def flush() -> None:
+        if blocks:
+            chunks.extend(_prefix_chunks("\n\n".join(blocks), heading_path))
+            blocks.clear()
+
+    for line in text.splitlines():
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            flush()
+            level = len(heading.group(1))
+            heading_path[:] = heading_path[:level - 1]
+            heading_path.append(heading.group(2).strip())
+        elif line.strip():
+            blocks.append(line.rstrip())
+        else:
+            flush()
+    flush()
+    return chunks
+
+
+def _docx_chunks(path: Path) -> list[str]:
+    from docx import Document
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    document = Document(str(path))
+    heading_path: list[str] = []
+    blocks: list[str] = []
+    chunks: list[str] = []
+
+    def flush() -> None:
+        if blocks:
+            chunks.extend(_prefix_chunks("\n\n".join(blocks), heading_path))
+            blocks.clear()
+
+    for element in document.element.body.iterchildren():
+        if element.tag.endswith("}p"):
+            paragraph = Paragraph(element, document)
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            match = re.fullmatch(r"Heading\s+(\d+)", paragraph.style.name or "")
+            if match:
+                flush()
+                level = int(match.group(1))
+                heading_path[:] = heading_path[:level - 1]
+                heading_path.append(text)
+            else:
+                blocks.append(text)
+        elif element.tag.endswith("}tbl"):
+            flush()
+            table = Table(element, document)
+            if not table.rows:
+                continue
+            header = " | ".join(cell.text.strip() for cell in table.rows[0].cells)
+            for row in table.rows[1:]:
+                row_text = " | ".join(cell.text.strip() for cell in row.cells)
+                chunks.extend(
+                    _prefix_chunks(
+                        row_text,
+                        heading_path,
+                        table_header=header,
+                    )
+                )
+    flush()
+    return chunks
+
+
+def chunk_document(path: Path) -> list[str]:
+    ext = path.suffix.lower()
+    if ext == ".md":
+        return _markdown_chunks(load_text(path))
+    if ext == ".docx":
+        return _docx_chunks(path)
+    return _prefix_chunks(load_text(path), [])
+
+
 def _cos(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     na = math.sqrt(sum(x * x for x in a))
@@ -239,8 +353,7 @@ def _index_files(
     all_chunks = []
     for path in paths:
         try:
-            raw_text = load_text(path)
-            chunks = chunk_text(raw_text)
+            chunks = chunk_document(path)
         except Exception as e:
             print(f"Warning: Failed to index file {path.name}: {e}")
             continue
@@ -334,7 +447,7 @@ def build_index(force_provider: str | None = None) -> str:
     )
 
 
-def search(query: str, k: int = 4) -> list[tuple[float, str, str]]:
+def search(query: str, k: int | None = None) -> list[tuple[float, str, str]]:
     data = _load()
     if not _metadata_matches(data):
         build_index()
@@ -364,12 +477,27 @@ def search(query: str, k: int = 4) -> list[tuple[float, str, str]]:
                 "Rebuild the index with the configured embedding model."
             )
         items = [(name, c) for name, d in index.items() for c in d["chunks"]]
-    scored = [
-        (_cos(query_embedding.vectors[0], c["vec"]), name, c["text"])
-        for name, c in items
-    ]
-    return sorted(scored, reverse=True)[:k]
+    scored = sorted(
+        (
+            (_cos(query_embedding.vectors[0], c["vec"]), name, c["text"])
+            for name, c in items
+        ),
+        reverse=True,
+    )
+    unique = []
+    seen = set()
+    for result in scored:
+        key = (result[1], result[2])
+        if key not in seen:
+            seen.add(key)
+            unique.append(result)
+    return unique[:config.RAG_TOP_K if k is None else k]
 
 
 if __name__ == "__main__":
+    query = " ".join(sys.argv[1:]).strip()
+    if not query:
+        raise SystemExit('Usage: python -m app.memory.rag "your query"')
     print(build_index())
+    for score, name, text in search(query):
+        print(f"\n[{score:.3f}] {name}\n{text}")

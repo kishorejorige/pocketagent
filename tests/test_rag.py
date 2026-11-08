@@ -82,6 +82,72 @@ def test_load_text_docx(tmp_path):
     assert "Header 1 | Value 1" in extracted
 
 
+def test_markdown_chunks_include_heading_path(tmp_path):
+    markdown_file = tmp_path / "prices.md"
+    markdown_file.write_text(
+        "# Suggested price menu\n\n"
+        "General market rates.\n\n"
+        "## US clients (USD)\n\n"
+        "Starter price: $500.\n\n"
+        "### FAQ chatbot\n\n"
+        "Starter tier: $600.",
+        encoding="utf-8",
+    )
+
+    chunks = rag.chunk_document(markdown_file)
+
+    assert any("Section path: Suggested price menu" in chunk for chunk in chunks)
+    assert any(
+        "Section path: Suggested price menu > US clients (USD)" in chunk
+        and "Starter price: $500." in chunk
+        for chunk in chunks
+    )
+    assert any(
+        "Section path: Suggested price menu > US clients (USD) > FAQ chatbot" in chunk
+        and "Starter tier: $600." in chunk
+        for chunk in chunks
+    )
+    assert all(len(chunk) <= rag.CHUNK_SIZE for chunk in chunks)
+
+
+def test_docx_table_rows_include_heading_and_repeated_header(tmp_path):
+    doc_path = tmp_path / "prices.docx"
+    document = docx.Document()
+    document.add_heading("Suggested price menu", level=1)
+    document.add_heading("US clients (USD)", level=2)
+    table = document.add_table(rows=3, cols=2)
+    table.cell(0, 0).text = "Service"
+    table.cell(0, 1).text = "Starter price"
+    table.cell(1, 0).text = "FAQ chatbot"
+    table.cell(1, 1).text = "$500"
+    table.cell(2, 0).text = "Support chatbot"
+    table.cell(2, 1).text = "$750"
+    document.add_heading("India clients (INR)", level=2)
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Service"
+    table.cell(0, 1).text = "Starter price"
+    table.cell(1, 0).text = "FAQ chatbot"
+    table.cell(1, 1).text = "₹20,000"
+    document.save(str(doc_path))
+
+    chunks = rag.chunk_document(doc_path)
+
+    us_chunks = [chunk for chunk in chunks if "US clients (USD)" in chunk]
+    us_chunk = next(chunk for chunk in us_chunks if "FAQ chatbot" in chunk)
+    second_us_chunk = next(chunk for chunk in us_chunks if "Support chatbot" in chunk)
+    india_chunk = next(chunk for chunk in chunks if "India clients (INR)" in chunk)
+    assert "Suggested price menu > US clients (USD)" in us_chunk
+    assert "Table header: Service | Starter price" in us_chunk
+    assert "FAQ chatbot | $500" in us_chunk
+    assert "Suggested price menu > US clients (USD)" in second_us_chunk
+    assert "Table header: Service | Starter price" in second_us_chunk
+    assert "Support chatbot | $750" in second_us_chunk
+    assert "Suggested price menu > India clients (INR)" in india_chunk
+    assert "Table header: Service | Starter price" in india_chunk
+    assert "FAQ chatbot | ₹20,000" in india_chunk
+    assert all(len(chunk) <= rag.CHUNK_SIZE for chunk in chunks)
+
+
 def test_load_text_pdf(tmp_path, monkeypatch):
     pdf_path = tmp_path / "test.pdf"
     pdf_path.write_bytes(b"%PDF-fake")
@@ -235,7 +301,7 @@ def test_old_index_without_embedding_metadata_is_rebuilt(
     index_file.write_text(
         json.dumps(
             {
-                "_version": 2,
+                "_version": rag.INDEX_VERSION - 1,
                 "documents": {
                     "good.txt": {
                         "mtime": (isolated_index / "good.txt").stat().st_mtime,
@@ -257,6 +323,40 @@ def test_old_index_without_embedding_metadata_is_rebuilt(
     gemini.assert_called_once()
 
 
+def test_index_rebuilds_after_index_version_bump(isolated_index, monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "gemini")
+    path = isolated_index / "doc.txt"
+    path.write_text("Current document content", encoding="utf-8")
+    rag.INDEX_FILE.write_text(
+        json.dumps(
+            {
+                "_version": rag.INDEX_VERSION - 1,
+                "embedding": {
+                    "provider": "gemini",
+                    "model": config.GEMINI_EMBED_MODEL,
+                    "vector_size": 2,
+                },
+                "documents": {
+                    "doc.txt": {
+                        "mtime": path.stat().st_mtime,
+                        "chunks": [{"text": "old chunk", "vec": [0.0, 1.0]}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    gemini = MagicMock(return_value=[[1.0, 0.0]])
+    monkeypatch.setattr(rag, "_gemini_batch", gemini)
+
+    rag.build_index()
+
+    saved = rag._load()
+    assert saved["_version"] == rag.INDEX_VERSION
+    assert saved["documents"]["doc.txt"]["chunks"][0]["text"] == "Current document content"
+    gemini.assert_called_once()
+
+
 def test_search_returns_best_matching_chunk(isolated_index, monkeypatch):
     monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "gemini")
 
@@ -275,6 +375,33 @@ def test_search_returns_best_matching_chunk(isolated_index, monkeypatch):
 
     assert results[0][1] == "fruit.txt"
     assert "Apple pie" in results[0][2]
+
+
+def test_search_returns_configured_top_k_and_deduplicates(isolated_index, monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "gemini")
+    monkeypatch.setattr(config, "RAG_TOP_K", 5)
+    for i in range(7):
+        (isolated_index / f"doc{i}.md").write_text(
+            f"# Section {i}\n\nUnique content {i}", encoding="utf-8"
+        )
+    monkeypatch.setattr(
+        rag, "_gemini_batch", lambda texts, prefix: [[1.0, 0.0] for _ in texts]
+    )
+
+    rag.build_index()
+    results = rag.search("query")
+
+    assert len(results) == 5
+    assert len({(name, text) for _, name, text in results}) == 5
+
+
+def test_system_prompt_requires_document_search_for_relevant_questions():
+    prompt = config.SYSTEM_PROMPT
+    assert "opening hours" in prompt
+    assert "call search_docs first" in prompt
+    assert "copy numbers exactly" in prompt
+    assert "Name each source document" in prompt
+    assert "which document each fact comes from" in prompt
 
 
 def test_auto_provider_change_never_compares_mismatched_index(
