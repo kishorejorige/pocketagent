@@ -27,6 +27,8 @@ API_KEY = os.getenv("API_KEY", "")  # optional: protects the /chat endpoint
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "auto").lower()  # gemini | ollama | auto
+GEMINI_EMBED_MODEL = os.getenv("GEMINI_EMBED_MODEL", "gemini-embedding-001")
 
 SYSTEM_PROMPT = (
     "You are PocketAgent, a helpful personal assistant. "

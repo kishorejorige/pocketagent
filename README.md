@@ -43,8 +43,7 @@ questions from your own documents.
 - Python 3.13
 - A Gemini API key
 - Docker Desktop (optional, for running the bot in the background)
-- Ollama (required for document search and embeddings; optional for local chat
-  models)
+- Ollama (optional; for local chat models or as an embedding fallback)
 
 ## Setup
 
@@ -77,7 +76,14 @@ Set `LLM_PROVIDER` in `.env` to choose the backend:
 - `gemini`: Gemini only.
 - `ollama`: local Ollama only.
 
-Ollama must be running and reachable at the configured `OLLAMA_URL`.
+Set `EMBEDDING_PROVIDER` to choose the document embedding backend:
+
+- `auto` (default): Gemini first, then Ollama if Gemini embeddings fail.
+- `gemini`: Gemini embeddings only.
+- `ollama`: Ollama embeddings only.
+
+The default Gemini embedding model is `gemini-embedding-001`. Ollama must be
+running and reachable at `OLLAMA_URL` only when selected or used as a fallback.
 
 ## Run PocketAgent
 
@@ -137,7 +143,8 @@ token.
 
 Put `.txt`, `.md`, `.pdf` or `.docx` files directly in `data/docs`, then ask the
 agent about them, for example "What documents do you have?" or "What does the
-refund policy say?". Scanned PDFs are not OCR-processed.
+refund policy say?". Gemini embeddings work with a Gemini API key alone;
+Ollama embeddings are an optional alternative. Scanned PDFs are not OCR-processed.
 
 ## Add a tool
 

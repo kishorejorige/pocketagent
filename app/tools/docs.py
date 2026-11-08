@@ -13,7 +13,7 @@ def search_docs(query: str) -> str:
         rag.build_index()  # picks up new or edited files
         results = rag.search(query)
     except Exception as e:
-        return f"Document search failed. Is Ollama running? ({e})"
+        return f"Document search failed: {e}"
     if not results:
         return "No documents found. Add .txt, .md, .pdf, or .docx files to data/docs."
     excerpts = "\n\n".join(f"[{name}] (score {s:.2f})\n{text}" for s, name, text in results)
