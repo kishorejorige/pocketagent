@@ -1,19 +1,29 @@
 """PocketAgent's offline document-Q&A loop. Run terminal chat with: python -m app.agent"""
 import re
-
-from google.genai import types
+from dataclasses import dataclass
 
 from app.memory import rag
 from app.tools.docs import list_docs
 
 
-def _user_texts(contents: list) -> list[str]:
+@dataclass
+class TextPart:
+    text: str
+
+
+@dataclass
+class ChatMessage:
+    role: str
+    parts: list[TextPart]
+
+
+def _user_texts(contents: list[ChatMessage]) -> list[str]:
     return [
         text
         for content in contents
         if content.role == "user"
         for part in (content.parts or [])
-        if (text := getattr(part, "text", None))
+        if (text := part.text)
     ]
 
 
@@ -31,7 +41,7 @@ def _answer(question: str, previous_question: str | None = None) -> str:
     return rag.answer(question)
 
 
-def run_agent(contents: list) -> str:
+def run_agent(contents: list[ChatMessage]) -> str:
     """Answer the latest user turn using only local documents and NLP."""
     questions = _user_texts(contents)
     if not questions:
@@ -41,12 +51,12 @@ def run_agent(contents: list) -> str:
         questions[-1],
         previous_question=questions[-2] if len(questions) > 1 else None,
     )
-    contents.append(types.Content(role="model", parts=[types.Part(text=reply)]))
+    contents.append(ChatMessage(role="model", parts=[TextPart(text=reply)]))
     return reply
 
 
 def main() -> None:
-    history: list = []
+    history: list[ChatMessage] = []
     print("PocketAgent ready (offline document search). Type 'quit' to exit.")
     while True:
         user_input = input("\nYou: ").strip()
@@ -54,7 +64,7 @@ def main() -> None:
             break
         if not user_input:
             continue
-        history.append(types.Content(role="user", parts=[types.Part(text=user_input)]))
+        history.append(ChatMessage(role="user", parts=[TextPart(text=user_input)]))
         print("Agent:", run_agent(history))
 
 

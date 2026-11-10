@@ -1,9 +1,7 @@
-google-genai
 python-dotenv
 pytest
 fastapi
 uvicorn
 python-telegram-bot
-ollama
 pypdf
 python-docx

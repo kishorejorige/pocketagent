@@ -22,9 +22,4 @@ TELEGRAM_TOKEN = _clean_env("TELEGRAM_TOKEN")
 TELEGRAM_USER_ID = _clean_env("TELEGRAM_USER_ID")
 API_KEY = os.getenv("API_KEY", "")  # optional: protects the /chat endpoint
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:4b")
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
-OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "10m")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))

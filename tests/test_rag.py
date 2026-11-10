@@ -204,7 +204,7 @@ def test_legacy_index_is_rebuilt_locally(isolated_index):
     path = isolated_index / "faq.txt"
     path.write_text("The cafe opens at 7:30 AM.", encoding="utf-8")
     rag.INDEX_FILE.write_text(
-        '{"_version": 4, "embedding": {"provider": "gemini"}, "documents": {}}',
+        '{"_version": 4, "embedding": {"provider": "legacy"}, "documents": {}}',
         encoding="utf-8",
     )
 

@@ -1,12 +1,11 @@
-from google.genai import types
-
 from app import agent
+from app.agent import ChatMessage, TextPart
 from app.memory import rag
 
 
 def _history(*questions):
     return [
-        types.Content(role="user", parts=[types.Part(text=question)])
+        ChatMessage(role="user", parts=[TextPart(text=question)])
         for question in questions
     ]
 

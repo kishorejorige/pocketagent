@@ -3,7 +3,7 @@
 PocketAgent is a local document Q&A bot. Chat with it in the terminal, on
 Telegram, or through a FastAPI endpoint. It searches your own documents and
 returns matching passages with their source filenames. Chat and document search
-do not call Gemini, Ollama, or another language-model API.
+do not call an external language-model API.
 
 ## Features
 
@@ -61,7 +61,8 @@ The first setup installs dependencies and creates `.env`. The launcher requires
 this file to exist for every mode. Set `TELEGRAM_TOKEN` and `TELEGRAM_USER_ID`
 in it to run the Telegram bot; those settings are not needed for terminal chat
 or the API. Keep `.env` private and do not commit it.
-`RAG_TOP_K` sets the maximum number of matching passages to return (default 5).
+`RAG_TOP_K` sets the number of candidate passages considered (default 5);
+answers include up to three relevant passages.
 `RATE_LIMIT_PER_MINUTE` limits each Telegram user and API session to 10
 messages per minute by default; set it to `0` to disable the limit.
 Set `API_KEY` to protect API requests with the `x-api-key` header. The API
@@ -137,21 +138,15 @@ To require an API key, set `API_KEY` in `.env` and include it in the
 ```powershell
 docker compose up -d --build
 docker compose ps
-docker compose logs -f api
-# In a second PowerShell window:
 docker compose logs -f bot
-# Stop the services:
 docker compose down
 ```
 
-Docker Compose starts both the Telegram bot and FastAPI service. The API is
-available at `http://127.0.0.1:8000` and is bound to localhost by default, so
-other computers cannot connect to it directly.
-`docker compose logs -f bot` and `docker compose logs -f api` show each service's
-logs. Docker restarts containers automatically unless you stop them. Compose
-bind-mounts `./data` to `/app/data`, so your documents and search index persist
-across container restarts. Conversation history is held in memory and resets
-when a service restarts.
+Docker Compose starts only the Telegram bot. To run the API locally, use
+`.\run.ps1 -Mode api`. Docker restarts the bot automatically unless you stop it.
+Compose bind-mounts `./data` to `/app/data`, so your documents and search index
+persist across container restarts. Conversation history is held in memory and
+resets when the bot restarts.
 
 Only one process can poll a Telegram bot token at a time. Stop any other local
 or remote bot instance using the same token before starting the Compose bot.
@@ -172,5 +167,5 @@ python -m pytest
 
 ## Tech
 
-Python 3.13, local TF-IDF document retrieval, FastAPI, SQLite,
-python-telegram-bot, Docker, pytest.
+Python 3.13, local TF-IDF document retrieval, FastAPI, python-telegram-bot,
+Docker, pytest.
