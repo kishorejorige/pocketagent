@@ -1,7 +1,3 @@
-import os
-
-os.environ.setdefault("GEMINI_API_KEY", "test")
-
 from google.genai import types
 
 from app import sessions

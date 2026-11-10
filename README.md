@@ -1,29 +1,25 @@
 # PocketAgent
 
-A personal AI assistant built from scratch in Python and Gemini, with no agent
-frameworks. Chat with it in the terminal, on Telegram, or through a FastAPI
-endpoint. It calls tools, remembers facts you ask it to save, and answers
-questions from your own documents.
-
-<!-- Add a screenshot after saving it as docs/telegram-demo.png, then uncomment:
-![PocketAgent on Telegram](docs/telegram-demo.png)
--->
+PocketAgent is a local document Q&A bot. Chat with it in the terminal, on
+Telegram, or through a FastAPI endpoint. It searches your own documents and
+returns matching passages with their source filenames. Chat and document search
+do not call Gemini, Ollama, or another language-model API.
 
 ## Features
 
-- **Manual tool-calling loop:** the agent decides when to call a tool, runs it,
-  and feeds the result back to the model.
-- **Tools:** current time, notes, tasks, public GitHub repository checks, saved
-  facts (remember, recall, forget), and document search and listing.
-- **Document Q&A (RAG):** ask questions about `.txt`, `.md`, `.pdf` and `.docx`
-  files placed in `data/docs`.
-- **Saved facts in SQLite:** facts you ask it to remember are stored in
-  `data/pocketagent.db` and survive restarts.
-- **Three interfaces:** terminal chat, a Telegram bot restricted to your user ID,
-  and a FastAPI service with `GET /health` and `POST /chat` (optional API key).
-- **Resilient:** retries on temporary Gemini errors (429, 500, 503), then tries
-  a fallback model. In `auto` mode it can switch to a local Ollama model.
-- **Deployable:** runs in Docker with a restart policy, and is covered by tests.
+- **Offline document Q&A:** search `.txt`, `.md`, `.pdf`, and `.docx` files in
+  `data/docs`.
+- **Local NLP ranking:** token normalization, stop-word filtering, query
+  synonym expansion, and corpus-trained TF-IDF/cosine similarity rank relevant
+  passages without a model download or external service.
+- **Source-grounded replies:** matching passages are quoted with their document
+  filename; if no good match is found, the bot says so instead of guessing.
+- **Three interfaces:** terminal chat, a Telegram bot restricted to your user
+  ID, and a FastAPI service with `GET /health` and `POST /chat` (optional API
+  key).
+- **Telegram document uploads:** authorized users can upload supported
+  documents, which are indexed automatically.
+- **Deployable:** runs in Docker with a restart policy and is covered by tests.
 
 ## How it works
 
@@ -32,18 +28,23 @@ questions from your own documents.
                    |
              sessions (chat history in memory)
                    |
-   agent loop  -->  tools: time, notes, tasks, GitHub, saved facts (SQLite),
-                    documents (RAG)
+          local NLP document search
+         (TF-IDF + cosine similarity)
                    |
-   Gemini (primary -> fallback model)  -->  optional local Ollama
+     data/docs -> extracted text chunks -> ranked passages
 ```
+
+The index is rebuilt when documents change and stored in `data/rag_index.json`.
+No external AI service, model download, or API key is needed for document
+indexing and answers.
+This statistical retrieval approach is lightweight and private, but unlike a
+generative model it does not invent or paraphrase information; it returns source
+text and can miss questions phrased very differently from the documents.
 
 ## Requirements
 
 - Python 3.13
-- A Gemini API key
 - Docker Desktop (optional, for running the bot in the background)
-- Ollama (optional; for local chat models or as an embedding fallback)
 
 ## Setup
 
@@ -56,54 +57,44 @@ python -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Edit `.env` and set `GEMINI_API_KEY`. The model names below are optional; these
-defaults are used when they are omitted:
-
-```dotenv
-GEMINI_API_KEY=your-gemini-api-key
-GEMINI_MODEL=gemini-3.8-flash
-GEMINI_FALLBACK_MODEL=gemini-3.1-flash-lite
-```
-
-Keep `.env` private. It is excluded from Git.
-
-### Model provider
-
-Set `LLM_PROVIDER` in `.env` to choose the backend:
-
-- `auto` (default): tries Gemini first, and if the Gemini call fails, switches to
-  local Ollama for the rest of that turn.
-- `gemini`: Gemini only.
-- `ollama`: local Ollama only.
-
-Set `EMBEDDING_PROVIDER` to choose the document embedding backend:
-
-- `auto` (default): Gemini first, then Ollama if Gemini embeddings fail.
-- `gemini`: Gemini embeddings only.
-- `ollama`: Ollama embeddings only.
-
-The default Gemini embedding model is `gemini-embedding-001`. Ollama must be
-running and reachable at `OLLAMA_URL` only when selected or used as a fallback.
-
-## Rate limits and fallback
-
-Gemini 429 responses switch to the fallback model immediately and cool down the
-limited model for `GEMINI_COOLDOWN_SECONDS` (default 600 seconds), or for the
-response's `Retry-After` duration when provided. HTTP 500/503 errors keep
-exponential retries. `RATE_LIMIT_PER_MINUTE` limits each Telegram user and API
-session to 10 messages per minute by default; set it to `0` to disable the limit.
+The first setup installs dependencies and creates `.env`. The launcher requires
+this file to exist for every mode. Set `TELEGRAM_TOKEN` and `TELEGRAM_USER_ID`
+in it to run the Telegram bot; those settings are not needed for terminal chat
+or the API. Keep `.env` private and do not commit it.
+`RAG_TOP_K` sets the maximum number of matching passages to return (default 5).
+`RATE_LIMIT_PER_MINUTE` limits each Telegram user and API session to 10
+messages per minute by default; set it to `0` to disable the limit.
+Set `API_KEY` to protect API requests with the `x-api-key` header. The API
+listens on localhost by default; do not expose it directly to the internet
+without configuring authentication and HTTPS through a trusted proxy.
 
 ## Run PocketAgent
+
+Use the PowerShell launcher from the project directory:
+
+```powershell
+.\run.ps1                 # Start the Telegram bot (default)
+.\run.ps1 -Mode terminal  # Start terminal chat
+.\run.ps1 -Mode api       # Start the FastAPI server at http://127.0.0.1:8000
+```
+
+The launcher uses `.venv` when available and otherwise uses `python` from your
+PATH. It expects dependencies to be installed using the setup steps above. If
+PowerShell blocks local scripts, run it with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -Mode terminal
+```
 
 ### Terminal chat
 
 ```powershell
-python -m app.agent
+.\run.ps1 -Mode terminal
 ```
 
 ### Telegram bot
 
-Create a bot with Telegram's BotFather, then add these values to `.env`:
+Create a bot with Telegram's BotFather, then set the following values in `.env`:
 
 ```dotenv
 TELEGRAM_TOKEN=your-telegram-bot-token
@@ -113,52 +104,65 @@ TELEGRAM_USER_ID=your-numeric-telegram-user-id
 Start the bot:
 
 ```powershell
-python -m app.telegram_bot
+.\run.ps1
 ```
 
 The bot responds only to the configured Telegram user ID and only to text
-messages. Run one polling instance per token; another process using the same
-token can cause Telegram polling conflicts. `/start` checks that the authorized
-account can reach the bot.
+messages and supported document uploads. Run one polling instance per token;
+another process using the same token can cause Telegram polling conflicts.
+`/start` checks that the authorized account can reach the bot.
 
 ### FastAPI service
 
 ```powershell
-python -m uvicorn app.api:app --reload
+.\run.ps1 -Mode api
 ```
 
-The API provides `GET /health` and `POST /chat`. Send JSON such as
-`{"message":"What time is it?","session_id":"local"}` to `/chat`. The
-`session_id` is optional. To require an API key, set `API_KEY` in `.env` and
-send it in the `x-api-key` header.
+The API provides `GET /health` and `POST /chat`. The `session_id` is optional.
+For example, from PowerShell:
 
-### Docker (runs the Telegram bot in the background)
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/health
+Invoke-RestMethod -Uri http://127.0.0.1:8000/chat `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"message":"What does the refund policy say?","session_id":"local"}'
+```
+
+To require an API key, set `API_KEY` in `.env` and include it in the
+`x-api-key` header on the `/chat` request.
+
+### Docker
 
 ```powershell
 docker compose up -d --build
-docker compose logs -f
+docker compose ps
+docker compose logs -f api
+# In a second PowerShell window:
+docker compose logs -f bot
+# Stop the services:
 docker compose down
 ```
 
-The container restarts automatically unless you stop it. Docker Compose
-bind-mounts `./data` to `/app/data`, so the SQLite database and your documents
-are kept across container restarts as long as that folder stays on the host.
-Conversation history is held in memory and resets when the process restarts.
-Stop any local copy of the bot first so two processes do not poll the same
-token.
+Docker Compose starts both the Telegram bot and FastAPI service. The API is
+available at `http://127.0.0.1:8000` and is bound to localhost by default, so
+other computers cannot connect to it directly.
+`docker compose logs -f bot` and `docker compose logs -f api` show each service's
+logs. Docker restarts containers automatically unless you stop them. Compose
+bind-mounts `./data` to `/app/data`, so your documents and search index persist
+across container restarts. Conversation history is held in memory and resets
+when a service restarts.
+
+Only one process can poll a Telegram bot token at a time. Stop any other local
+or remote bot instance using the same token before starting the Compose bot.
 
 ## Ask questions about your documents
 
-Put `.txt`, `.md`, `.pdf` or `.docx` files directly in `data/docs`, then ask the
-agent about them, for example "What documents do you have?" or "What does the
-refund policy say?". Gemini embeddings work with a Gemini API key alone;
-Ollama embeddings are an optional alternative. Scanned PDFs are not OCR-processed.
-
-## Add a tool
-
-Write a function with type hints and a docstring in `app/tools/`, import it, and
-add it to `ALL_TOOLS` in `app/tools/__init__.py`. The agent uses the function
-definitions to expose tools to Gemini.
+Put `.txt`, `.md`, `.pdf`, or `.docx` files directly in `data/docs`, then ask a
+question about them, for example "What does the refund policy say?" or "When is
+the cafe open?". Answers include the source filename. Scanned PDFs are not
+OCR-processed. Questions that cannot be matched to the local documents receive
+a clear not-found reply.
 
 ## Tests
 
@@ -168,5 +172,5 @@ python -m pytest
 
 ## Tech
 
-Python 3.13, Gemini API, FastAPI, SQLite, python-telegram-bot, Ollama, Docker,
-pytest.
+Python 3.13, local TF-IDF document retrieval, FastAPI, SQLite,
+python-telegram-bot, Docker, pytest.

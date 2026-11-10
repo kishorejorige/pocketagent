@@ -1,8 +1,5 @@
 import asyncio
-import os
 from unittest.mock import AsyncMock, MagicMock
-
-os.environ.setdefault("GEMINI_API_KEY", "test")
 
 from fastapi.testclient import TestClient
 

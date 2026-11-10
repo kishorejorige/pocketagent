@@ -1,47 +1,56 @@
-"""Chunk documents, embed them with Gemini or Ollama, and search by cosine similarity.
+"""Index documents locally and search them with TF-IDF cosine similarity.
 Run `python -m app.memory.rag` to (re)build the index by hand."""
 import json
 import math
 import re
 import sys
-import time
-import urllib.request
-from dataclasses import dataclass
+from collections import Counter
 from pathlib import Path
-
-import httpx
-from google import genai
-from google.genai import errors, types
 
 from app import config
 from app.config import DATA_DIR
 
 DOCS_DIR = DATA_DIR / "docs"
 INDEX_FILE = DATA_DIR / "rag_index.json"
-INDEX_VERSION = 4
+INDEX_VERSION = 5
 EXTENSIONS = {".txt", ".md", ".pdf", ".docx"}
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
-EMBED_BATCH_SIZE = 16
-EMBED_BATCH_DELAY = 1
-EMBED_RETRIES = 5
-RETRYABLE_CODES = (429, 500, 503)
-EMBEDDING_ERRORS = (errors.APIError, httpx.HTTPError, OSError, ValueError, KeyError)
+MIN_ANSWER_SCORE = 0.08
+NO_ANSWER = (
+    "I couldn't find that information in the local documents. Try rephrasing the "
+    "question or add a relevant .txt, .md, .pdf, or .docx file to data/docs."
+)
 
-
-@dataclass
-class EmbeddingResult:
-    vectors: list[list[float]]
-    provider: str
-    model: str
-    vector_size: int
+_STOP_WORDS = {
+    "a", "about", "after", "all", "am", "an", "and", "any", "are", "as", "at",
+    "be", "because", "before", "been", "being", "but", "by", "can", "could",
+    "did", "do", "does", "for", "from", "get", "give", "has", "have", "how",
+    "i", "if", "in", "is", "it", "its", "me", "my", "of", "on", "or", "our",
+    "please", "say", "should", "so", "tell", "that", "the", "their", "them",
+    "there", "these", "they", "this", "those", "to", "us", "was", "we", "were",
+    "what", "when", "where", "which", "who", "why", "will", "with", "would",
+    "you", "your",
+}
+_QUERY_SYNONYMS = {
+    "cost": {"price"},
+    "money": {"refund"},
+    "back": {"refund"},
+    "return": {"refund"},
+    "schedule": {"hour", "open"},
+    "time": {"hour", "open"},
+    "park": {"parking"},
+    "car": {"parking"},
+    "event": {"catering"},
+    "cater": {"catering"},
+}
 
 
 def load_text(path: Path) -> str:
     """Load text content from a .txt, .md, .pdf, or .docx file."""
     ext = path.suffix.lower()
     if ext in {".txt", ".md"}:
-        return path.read_text(encoding="utf-8", errors="ignore")
+        return path.read_text(encoding="utf-8-sig", errors="ignore")
     elif ext == ".pdf":
         import pypdf
         reader = pypdf.PdfReader(str(path))
@@ -64,100 +73,56 @@ def load_text(path: Path) -> str:
         raise ValueError(f"Unsupported file extension: {ext}")
 
 
-def _validate_vectors(vectors: list[list[float]], count: int) -> list[list[float]]:
-    if len(vectors) != count or not vectors or not vectors[0]:
-        raise ValueError("Embedding provider returned an incomplete response.")
-    if any(len(vector) != len(vectors[0]) for vector in vectors):
-        raise ValueError("Embedding provider returned inconsistent vector sizes.")
-    return vectors
+def _stem(token: str) -> str:
+    if len(token) > 5 and token.endswith("ies"):
+        return token[:-3] + "y"
+    for suffix in ("ing", "edly", "ed", "able", "ly", "es", "s"):
+        if len(token) - len(suffix) >= 3 and token.endswith(suffix):
+            token = token[:-len(suffix)]
+            break
+    return token
 
 
-def _gemini_batch(texts: list[str], prefix: str) -> list[list[float]]:
-    task_type = "RETRIEVAL_QUERY" if prefix == "search_query: " else "RETRIEVAL_DOCUMENT"
-    client = genai.Client(api_key=config.GEMINI_API_KEY)
-    delay = 2
-    for attempt in range(EMBED_RETRIES):
-        try:
-            response = client.models.embed_content(
-                model=config.GEMINI_EMBED_MODEL,
-                contents=texts,
-                config=types.EmbedContentConfig(task_type=task_type),
-            )
-            vectors = [
-                list(item.values or []) for item in (response.embeddings or [])
-            ]
-            return _validate_vectors(vectors, len(texts))
-        except errors.APIError as e:
-            if e.code not in RETRYABLE_CODES or attempt == EMBED_RETRIES - 1:
-                raise
-            time.sleep(delay)
-            delay *= 2
-    raise RuntimeError("Gemini embedding retries were exhausted.")
-
-
-def _ollama_batch(texts: list[str], prefix: str) -> list[list[float]]:
-    body = json.dumps(
-        {"model": config.EMBED_MODEL, "input": [prefix + t for t in texts]}
-    ).encode()
-    req = urllib.request.Request(
-        f"{config.OLLAMA_URL}/api/embed",
-        data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        vectors = json.load(r)["embeddings"]
-    return _validate_vectors(vectors, len(texts))
-
-
-def _embed_batches(
-    texts: list[str], prefix: str, provider: str
-) -> EmbeddingResult:
-    model = config.GEMINI_EMBED_MODEL if provider == "gemini" else config.EMBED_MODEL
-    vectors: list[list[float]] = []
-    vector_size = 0
-    for offset in range(0, len(texts), EMBED_BATCH_SIZE):
-        if offset and provider == "gemini":
-            time.sleep(EMBED_BATCH_DELAY)
-        batch = texts[offset:offset + EMBED_BATCH_SIZE]
-        batch_vectors = (
-            _gemini_batch(batch, prefix)
-            if provider == "gemini"
-            else _ollama_batch(batch, prefix)
+def _tokens(text: str, expand_query: bool = False) -> list[str]:
+    tokens = [
+        _stem(token.lower())
+        for token in re.findall(r"[^\W_]+", text, flags=re.UNICODE)
+    ]
+    tokens = [token for token in tokens if token not in _STOP_WORDS and len(token) > 1]
+    if expand_query:
+        tokens.extend(
+            _stem(synonym)
+            for token in tuple(tokens)
+            for synonym in _QUERY_SYNONYMS.get(token, ())
         )
-        if vector_size and any(len(vector) != vector_size for vector in batch_vectors):
-            raise ValueError("Embedding provider returned inconsistent vector sizes.")
-        vector_size = len(batch_vectors[0])
-        vectors.extend(batch_vectors)
-    return EmbeddingResult(vectors, provider, model, vector_size)
+    return tokens
 
 
-def embed(
-    texts: list[str], prefix: str, provider: str | None = None
-) -> EmbeddingResult:
-    """Create a consistent set of vectors, preferring Gemini in auto mode."""
-    selected = provider or config.EMBEDDING_PROVIDER
-    if selected not in {"auto", "gemini", "ollama"}:
-        raise ValueError("EMBEDDING_PROVIDER must be gemini, ollama, or auto.")
-    if selected == "auto":
-        try:
-            return _embed_batches(texts, prefix, "gemini")
-        except EMBEDDING_ERRORS as gemini_error:
-            try:
-                return _embed_batches(texts, prefix, "ollama")
-            except EMBEDDING_ERRORS as ollama_error:
-                raise RuntimeError(
-                    "No embedding provider is available. Set GEMINI_API_KEY and check "
-                    "GEMINI_EMBED_MODEL, or start Ollama and check OLLAMA_URL. "
-                    f"(Gemini: {type(gemini_error).__name__}; "
-                    f"Ollama: {type(ollama_error).__name__})"
-                ) from ollama_error
-    try:
-        return _embed_batches(texts, prefix, selected)
-    except EMBEDDING_ERRORS as e:
-        raise RuntimeError(
-            f"{selected.title()} embeddings failed ({type(e).__name__}). Set "
-            "GEMINI_API_KEY or start Ollama, or change EMBEDDING_PROVIDER."
-        ) from e
+def _cos(a: dict[str, float], b: dict[str, float]) -> float:
+    if not a or not b:
+        return 0.0
+    dot = sum(weight * b.get(term, 0.0) for term, weight in a.items())
+    norm_a = math.sqrt(sum(weight * weight for weight in a.values()))
+    norm_b = math.sqrt(sum(weight * weight for weight in b.values()))
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+
+def _tfidf_vectors(documents: list[str], query: str) -> tuple[list[dict[str, float]], dict[str, float]]:
+    document_terms = [Counter(_tokens(text)) for text in documents]
+    query_terms = Counter(_tokens(query, expand_query=True))
+    document_frequency = Counter(
+        term for terms in document_terms for term in terms
+    )
+    count = len(document_terms)
+
+    def vectorize(terms: Counter) -> dict[str, float]:
+        return {
+            term: (1 + math.log(frequency))
+            * (math.log((count + 1) / (document_frequency[term] + 1)) + 1)
+            for term, frequency in terms.items()
+        }
+
+    return [vectorize(terms) for terms in document_terms], vectorize(query_terms)
 
 
 def chunk_text(text: str, size: int = 900, overlap: int = 150) -> list[str]:
@@ -290,13 +255,6 @@ def chunk_document(path: Path) -> list[str]:
     return _prefix_chunks(load_text(path), [])
 
 
-def _cos(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a))
-    nb = math.sqrt(sum(x * x for x in b))
-    return dot / (na * nb) if na and nb else 0.0
-
-
 def _load() -> dict:
     if INDEX_FILE.exists():
         try:
@@ -308,92 +266,39 @@ def _load() -> dict:
     return {}
 
 
-def _metadata_matches(data: dict, provider: str | None = None) -> bool:
-    metadata = data.get("embedding")
-    if not isinstance(metadata, dict):
-        return False
-    actual_provider = metadata.get("provider")
-    if actual_provider not in {"gemini", "ollama"}:
-        return False
-    if provider and actual_provider != provider:
-        return False
+def _metadata_matches(data: dict) -> bool:
     if (
-        config.EMBEDDING_PROVIDER != "auto"
-        and actual_provider != config.EMBEDDING_PROVIDER
+        data.get("_version") != INDEX_VERSION
+        or data.get("algorithm") != "local-tfidf-v1"
     ):
         return False
-    expected_model = (
-        config.GEMINI_EMBED_MODEL if actual_provider == "gemini" else config.EMBED_MODEL
-    )
-    if metadata.get("model") != expected_model:
-        return False
-    vector_size = metadata.get("vector_size")
-    if type(vector_size) is not int or vector_size < 0:
-        return False
-    if data.get("_version") != INDEX_VERSION:
-        return False
-    for document in data["documents"].values():
+    for document in data.get("documents", {}).values():
         if not isinstance(document, dict) or not isinstance(document.get("chunks"), list):
             return False
-        for chunk in document["chunks"]:
-            vector = chunk.get("vec") if isinstance(chunk, dict) else None
-            if (
-                not isinstance(vector, list)
-                or len(vector) != vector_size
-                or any(not isinstance(value, (int, float)) for value in vector)
-            ):
-                return False
+        if any(
+            not isinstance(chunk, dict) or not isinstance(chunk.get("text"), str)
+            for chunk in document["chunks"]
+        ):
+            return False
     return True
 
 
-def _index_files(
-    paths: list[Path], provider: str | None = None
-) -> tuple[dict, dict | None]:
-    prepared = []
-    all_chunks = []
+def _index_files(paths: list[Path]) -> dict:
+    documents = {}
     for path in paths:
         try:
             chunks = chunk_document(path)
         except Exception as e:
             print(f"Warning: Failed to index file {path.name}: {e}")
             continue
-        prepared.append((path, chunks))
-        all_chunks.extend(chunks)
-
-    result = embed(all_chunks, "search_document: ", provider) if all_chunks else None
-    metadata = (
-        {
-            "provider": result.provider,
-            "model": result.model,
-            "vector_size": result.vector_size,
-        }
-        if result
-        else None
-    )
-    documents = {}
-    offset = 0
-    for path, chunks in prepared:
-        vectors = result.vectors[offset:offset + len(chunks)] if result else []
-        offset += len(chunks)
         documents[path.name] = {
             "mtime": path.stat().st_mtime,
-            "chunks": [
-                {"text": text, "vec": [round(value, 5) for value in vector]}
-                for text, vector in zip(chunks, vectors)
-            ],
+            "chunks": [{"text": text} for text in chunks],
         }
-    return documents, metadata
+    return documents
 
 
-def _configured_metadata(provider: str | None = None) -> dict:
-    actual_provider = provider or config.EMBEDDING_PROVIDER
-    if actual_provider == "auto":
-        actual_provider = "gemini"
-    model = config.GEMINI_EMBED_MODEL if actual_provider == "gemini" else config.EMBED_MODEL
-    return {"provider": actual_provider, "model": model, "vector_size": 0}
-
-
-def build_index(force_provider: str | None = None) -> str:
+def build_index() -> str:
     """Index new or changed files and drop deleted ones. Cheap when nothing changes."""
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     data = _load()
@@ -401,9 +306,9 @@ def build_index(force_provider: str | None = None) -> str:
         f.name: f for f in DOCS_DIR.iterdir()
         if f.is_file() and f.suffix.lower() in EXTENSIONS
     }
-    valid_index = _metadata_matches(data, force_provider)
+    valid_index = _metadata_matches(data)
     old_index = data.get("documents", {}) if valid_index else {}
-    force_rebuild = force_provider is not None or not valid_index
+    force_rebuild = not valid_index
     changed_files = [
         path for name, path in files.items()
         if force_rebuild or old_index.get(name, {}).get("mtime") != path.stat().st_mtime
@@ -413,30 +318,19 @@ def build_index(force_provider: str | None = None) -> str:
         total = sum(len(doc["chunks"]) for doc in old_index.values())
         return f"{len(old_index)} documents, {total} chunks (0 updated)"
 
-    updated, new_metadata = _index_files(changed_files, force_provider)
-
-    if not force_rebuild and new_metadata:
-        old_metadata = data["embedding"]
-        if new_metadata != {
-            "provider": old_metadata["provider"],
-            "model": old_metadata["model"],
-            "vector_size": old_metadata["vector_size"],
-        }:
-            force_rebuild = True
-            updated, new_metadata = _index_files(
-                list(files.values()), new_metadata["provider"]
-            )
+    updated = _index_files(changed_files)
 
     index = updated if force_rebuild else {**old_index, **updated}
     for name in deleted:
         index.pop(name, None)
-    metadata = new_metadata or (
-        data.get("embedding") if not force_rebuild else _configured_metadata(force_provider)
-    )
     if force_rebuild or updated or deleted:
         INDEX_FILE.write_text(
             json.dumps(
-                {"_version": INDEX_VERSION, "embedding": metadata, "documents": index}
+                {
+                    "_version": INDEX_VERSION,
+                    "algorithm": "local-tfidf-v1",
+                    "documents": index,
+                }
             ),
             encoding="utf-8"
         )
@@ -454,33 +348,13 @@ def search(query: str, k: int | None = None) -> list[tuple[float, str, str]]:
         data = _load()
     index = data.get("documents", {})
     items = [(name, c) for name, d in index.items() for c in d["chunks"]]
-    if not items:
+    if not items or not _tokens(query, expand_query=True):
         return []
-    query_embedding = embed([query], "search_query: ")
-    metadata = data.get("embedding", {})
-    if (
-        metadata.get("provider") != query_embedding.provider
-        or metadata.get("model") != query_embedding.model
-    ):
-        raise RuntimeError(
-            "The document index uses a different embedding provider or model than this "
-            "query. Rebuild the index with a matching EMBEDDING_PROVIDER and model."
-        )
-    if metadata.get("vector_size") != query_embedding.vector_size:
-        build_index(force_provider=query_embedding.provider)
-        data = _load()
-        metadata = data.get("embedding", {})
-        index = data.get("documents", {})
-        if metadata.get("vector_size") != query_embedding.vector_size:
-            raise RuntimeError(
-                "The document index and query embeddings have different vector sizes. "
-                "Rebuild the index with the configured embedding model."
-            )
-        items = [(name, c) for name, d in index.items() for c in d["chunks"]]
+    vectors, query_vector = _tfidf_vectors([chunk["text"] for _, chunk in items], query)
     scored = sorted(
         (
-            (_cos(query_embedding.vectors[0], c["vec"]), name, c["text"])
-            for name, c in items
+            (_cos(vector, query_vector), name, chunk["text"])
+            for (name, chunk), vector in zip(items, vectors)
         ),
         reverse=True,
     )
@@ -492,6 +366,42 @@ def search(query: str, k: int | None = None) -> list[tuple[float, str, str]]:
             seen.add(key)
             unique.append(result)
     return unique[:config.RAG_TOP_K if k is None else k]
+
+
+def answer(query: str) -> str:
+    """Return relevant document passages with their source, without external models."""
+    results = search(query)
+    candidates = [
+        (score, name, paragraph.strip())
+        for score, name, text in results
+        for paragraph in re.split(r"\n\s*\n", text)
+        if paragraph.strip()
+    ]
+    if not candidates:
+        return NO_ANSWER
+
+    paragraph_vectors, query_vector = _tfidf_vectors(
+        [paragraph for _, _, paragraph in candidates], query
+    )
+    scored = sorted(
+        (
+            (0.4 * chunk_score + 0.6 * _cos(vector, query_vector), name, paragraph)
+            for (chunk_score, name, paragraph), vector
+            in zip(candidates, paragraph_vectors)
+        ),
+        reverse=True,
+    )
+    relevant = [result for result in scored if result[0] >= MIN_ANSWER_SCORE]
+    if not relevant:
+        return NO_ANSWER
+    best_score = relevant[0][0]
+    relevant = [
+        result for result in relevant
+        if result[0] >= max(MIN_ANSWER_SCORE, best_score * 0.55)
+    ][:3]
+    return "\n\n".join(
+        f"According to {name}:\n{text}" for _, name, text in relevant
+    )
 
 
 if __name__ == "__main__":

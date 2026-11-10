@@ -1,129 +1,77 @@
-import os
-from types import SimpleNamespace
-from unittest.mock import MagicMock
+from google.genai import types
 
-import pytest
-from google.genai import errors, types
-
-os.environ.setdefault("GEMINI_API_KEY", "test")
-
-from app import agent, config
+from app import agent
+from app.memory import rag
 
 
-@pytest.fixture(autouse=True)
-def clear_cooldowns(monkeypatch):
-    with agent._cooldown_lock:
-        agent._model_cooldowns.clear()
-    monkeypatch.setattr(config, "MODEL", "primary")
-    monkeypatch.setattr(config, "FALLBACK_MODEL", "fallback")
-    monkeypatch.setattr(config, "GEMINI_COOLDOWN_SECONDS", 600)
-    monkeypatch.setattr(config, "LLM_PROVIDER", "gemini")
-    monkeypatch.setattr(agent.time, "sleep", lambda delay: None)
+def _history(*questions):
+    return [
+        types.Content(role="user", parts=[types.Part(text=question)])
+        for question in questions
+    ]
 
 
-def _success():
-    return SimpleNamespace(
-        function_calls=None,
-        text="ok",
-        candidates=[
-            SimpleNamespace(
-                content=types.Content(role="model", parts=[types.Part(text="ok")])
-            )
-        ],
+def test_agent_answers_from_local_documents_and_saves_history(tmp_path, monkeypatch):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    monkeypatch.setattr(rag, "DOCS_DIR", docs_dir)
+    monkeypatch.setattr(rag, "INDEX_FILE", tmp_path / "rag_index.json")
+    (docs_dir / "faq.txt").write_text(
+        "Opening hours: Monday to Friday 7:30 AM to 6:00 PM.",
+        encoding="utf-8",
     )
+    history = _history("When does the cafe open?")
+
+    reply = agent.run_agent(history)
+
+    assert "faq.txt" in reply
+    assert "7:30 AM to 6:00 PM" in reply
+    assert history[-1].role == "model"
+    assert history[-1].parts[0].text == reply
 
 
-def _api_error(code, headers=None):
-    response = SimpleNamespace(headers=headers or {})
-    return errors.APIError(code, {}, response=response)
+def test_agent_uses_previous_question_for_follow_up(tmp_path, monkeypatch):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    monkeypatch.setattr(rag, "DOCS_DIR", docs_dir)
+    monkeypatch.setattr(rag, "INDEX_FILE", tmp_path / "rag_index.json")
+    (docs_dir / "faq.txt").write_text(
+        "Opening hours: Monday to Friday 7:30 AM to 6:00 PM. "
+        "Saturday 8:00 AM to 4:00 PM.",
+        encoding="utf-8",
+    )
+    history = _history("When are opening hours?", "And Saturdays?")
+
+    reply = agent.run_agent(history)
+
+    assert "Saturday 8:00 AM to 4:00 PM" in reply
 
 
-def test_429_switches_to_fallback_immediately(monkeypatch):
-    calls = []
-    client = MagicMock()
-    client.models.generate_content.side_effect = [
-        _api_error(429),
-        _success(),
-    ]
-    monkeypatch.setattr(agent, "client", client)
-    sleeps = []
-    monkeypatch.setattr(agent.time, "sleep", sleeps.append)
+def test_agent_lists_documents_without_an_external_model(tmp_path, monkeypatch):
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    (docs_dir / "guide.txt").write_text("Local guide", encoding="utf-8")
+    monkeypatch.setattr(rag, "DOCS_DIR", docs_dir)
+    history = _history("What documents do you have?")
 
-    result = agent.call_gemini([])
+    reply = agent.run_agent(history)
 
-    assert result.text == "ok"
-    assert [call.kwargs["model"] for call in client.models.generate_content.call_args_list] == [
-        "primary", "fallback"
-    ]
-    assert sleeps == []
-    assert "primary" in agent._model_cooldowns
+    assert "guide.txt" in reply
 
 
-def test_cooldown_skips_primary_until_expiration(monkeypatch):
-    now = [100.0]
-    monkeypatch.setattr(agent.time, "monotonic", lambda: now[0])
-    client = MagicMock()
-    client.models.generate_content.side_effect = [
-        _api_error(429),
-        _success(),
-        _success(),
-        _success(),
-    ]
-    monkeypatch.setattr(agent, "client", client)
-
-    agent.call_gemini([])
-    agent.call_gemini([])
-    assert [call.kwargs["model"] for call in client.models.generate_content.call_args_list] == [
-        "primary", "fallback", "fallback"
-    ]
-
-    now[0] += config.GEMINI_COOLDOWN_SECONDS + 1
-    agent.call_gemini([])
-    assert client.models.generate_content.call_args_list[-1].kwargs["model"] == "primary"
+def test_agent_without_user_message_returns_local_guidance():
+    assert "local documents" in agent.run_agent([])
 
 
-def test_retry_after_sets_model_cooldown_without_sleep(monkeypatch):
-    now = [25.0]
-    monkeypatch.setattr(agent.time, "monotonic", lambda: now[0])
-    client = MagicMock()
-    client.models.generate_content.side_effect = [
-        _api_error(429, {"Retry-After": "42"}),
-        _success(),
-    ]
-    monkeypatch.setattr(agent, "client", client)
-    sleeps = []
-    monkeypatch.setattr(agent.time, "sleep", sleeps.append)
+def test_agent_routes_question_to_local_rag(monkeypatch):
+    history = _history("question from the user")
+    called = []
 
-    agent.call_gemini([])
+    def local_answer(question):
+        called.append(question)
+        return "local answer"
 
-    assert agent._model_cooldowns["primary"] == 67.0
-    assert sleeps == []
+    monkeypatch.setattr(agent.rag, "answer", local_answer)
 
-
-def test_503_retries_with_exponential_backoff(monkeypatch):
-    client = MagicMock()
-    client.models.generate_content.side_effect = [_api_error(503), _success()]
-    monkeypatch.setattr(agent, "client", client)
-    sleeps = []
-    monkeypatch.setattr(agent.time, "sleep", sleeps.append)
-
-    assert agent.call_gemini([]).text == "ok"
-    assert sleeps == [2]
-    assert [call.kwargs["model"] for call in client.models.generate_content.call_args_list] == [
-        "primary", "primary"
-    ]
-
-
-def test_both_models_failing_returns_friendly_message(monkeypatch):
-    monkeypatch.setattr(config, "GEMINI_COOLDOWN_SECONDS", 600)
-    client = MagicMock()
-    client.models.generate_content.side_effect = [
-        _api_error(429),
-        _api_error(429),
-    ]
-    monkeypatch.setattr(agent, "client", client)
-
-    reply = agent.run_agent([])
-
-    assert "Both Gemini models are unavailable or rate-limited" in reply
-    assert client.models.generate_content.call_count == 2
+    assert agent.run_agent(history) == "local answer"
+    assert called == ["question from the user"]

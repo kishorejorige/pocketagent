@@ -1,5 +1,5 @@
 """Register tools here. To add a tool: write a function with type hints and a
-docstring, import it, and add it to ALL_TOOLS. Gemini builds the schema from it."""
+docstring, import it, and add it to ALL_TOOLS."""
 from .clock import get_current_time
 from .docs import list_docs, search_docs
 from .github import check_github_repo

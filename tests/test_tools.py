@@ -1,7 +1,4 @@
-"""Tools are plain functions, so test them without calling Gemini. Run: pytest"""
-import os
-
-os.environ.setdefault("GEMINI_API_KEY", "test")
+"""Tools are plain functions, so test them without external model calls."""
 
 from app.memory import rag
 from app.tools import docs, github, notes, tasks
